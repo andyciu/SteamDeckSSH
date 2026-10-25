@@ -8,9 +8,10 @@ echo_I() { zenity --info --width="${2:-100}" --text="$1" 2> /dev/null; }
 
 ### FUNCTIONS
 
-## Random password generator
-# $1-Password length
-_randomPasswordGen() { tr -dc 'A-Za-z0-9!"#%&$'\''()*+,-./:;<>=?@[]\^_`|{}~' </dev/urandom | head -c "${1:-16}"; echo; }
+## Random string generator
+# Alphanumeric only, so the result is always safe to store in a JSON file
+# $1-Length
+_randomPasswordGen() { tr -dc 'A-Za-z0-9' </dev/urandom | head -c "${1:-16}"; echo; }
 
 ## Checks if user exists
 # $1-Username
@@ -45,28 +46,29 @@ fi
 }
 
 ## AES-256 (DE/EN)CRYPTION
-# $1-Input string
+# $1-Input string; $2-Key
+# The key is passed through an environment variable, so it doesn't show up in the process list
 # Reference: https://www.howtogeek.com/734838/how-to-use-encrypted-passwords-in-bash-scripts/
 _encrypt() {
 local _p; _p=${2:-$SESSION_GUID} # set default password
-echo "$1" | openssl enc -aes-256-cbc -md sha512 -a -pbkdf2 -iter 100000 -salt -pass "pass:$_p"
+printf '%s\n' "$1" | _K="$_p" openssl enc -aes-256-cbc -md sha512 -a -pbkdf2 -iter 100000 -salt -pass env:_K
 }
 _decrypt() {
 local _p; _p=${2:-$SESSION_GUID} # set default password
-echo "$1" | openssl enc -aes-256-cbc -md sha512 -a -d -pbkdf2 -iter 100000 -salt -pass "pass:$_p"
+printf '%s\n' "$1" | _K="$_p" openssl enc -aes-256-cbc -md sha512 -a -d -pbkdf2 -iter 100000 -salt -pass env:_K 2> /dev/null
 }
 
 ## Get password variable
-_getPassword() { _decrypt "$passWord"; }
+_getPassword() { [ -n "$passWord" ] && _decrypt "$passWord"; }
 ## Set password variable
 _setPassword() { passWord=$(_encrypt "$1"); }
 
-_readUserSec() { _decrypt "$(cat $UserSecPath)" "$SEC_KEY"; }
-_writeUserSec() { _encrypt "$1" "$SEC_KEY" > $UserSecPath; }
+_readUserSec() { [ -s "$UserSecPath" ] && _decrypt "$(cat "$UserSecPath")" "$SEC_KEY"; }
+_writeUserSec() { (umask 077; _encrypt "$1" "$SEC_KEY" > "$UserSecPath"); }
 
 ## Validate Sudo Password and claim root rights
 _validateSudoPassword() {
-local _t; _t=$(echo "$1" | sudo -Svp '' 2>&1) # test
+local _t; _t=$(printf '%s\n' "$1" | sudo -Svp '' 2>&1) # test
 local _vo; _vo=${2:-0} # validate_only flag
 if [ -z "$_t" ]; then
 	echo 1 # sudo_pswd_valid
@@ -76,35 +78,54 @@ fi
 
 ## Read password from user input if it does have one set
 _readExistingUserPassword() {
-local _p; _p=$(_getPassword)
-local _f=0 # helps to omit the encryption on the first try (when the script tries out a default password)
+local _p; _p=$(_getPassword) # remembered password (if any)
 while true; do
-	# if given password is valid then encrypt it
-	echo "Trying out the given password..."
-	if [ "$(_validateSudoPassword "$_p")" = 1 ]; then
-		[ $_f = 1 ] && _setPassword "$_p" && 
-		[ "$REMEMBER_PASSWORD" = "1" ] && _writeUserSec "$_p"
-		break
+	# Don't try out an empty password, as every failed attempt counts towards the sudo lockout
+	if [ -n "$_p" ]; then
+		echo "Trying out the given password..."
+		if [ "$(_validateSudoPassword "$_p")" = 1 ]; then
+			_setPassword "$_p"
+			[ "$REMEMBER_PASSWORD" = "1" ] && _writeUserSec "$_p"
+			break
+		fi
+		echo_W "Invalid password!\nPlease, enter a correct sudo password in the next window." "270"
 	fi
-	_f=1
-	# If user didn't got password set and now the default password isn't working it means that it has been changed and shouldn't be removed on finalization
-	[ "$DEF_USR_HAS_PASSWD" = 0 ] && USR_CHANGED_PASSWD=1
 	# Prompt user for a valid password
-	echo_W "Invalid password!\nPlease, enter a correct sudo password in the next window." "270"
-	_p="$(zenity --password 2> /dev/null)"
-	local _err="$?"; [ "$_err" != 0 ] && exit
+	_p="$(zenity --password --title="$TOOL_NAME $TOOL_VERSION" 2> /dev/null)" || exit
 done
 clear
 }
 
+## Ask user to choose a new password (used when the account doesn't have one)
+_askNewPassword() {
+local _sep=$'\x1e'
+local _r _p1 _p2
+while true; do
+	_r="$(zenity --forms \
+	--title="$TOOL_NAME $TOOL_VERSION" \
+	--width="350" \
+	--text="Your account has no password, but sudo needs one.\nPlease, choose your own password (at least $MIN_PASSWD_LEN characters)." \
+	--add-password="Password" \
+	--add-password="Confirm password" \
+	--separator="$_sep" 2> /dev/null)" || exit
+	_p1="${_r%%"$_sep"*}"
+	_p2="${_r#*"$_sep"}"
+	if [ "$_p1" != "$_p2" ]; then
+		echo_W "Passwords do not match!" "200"
+	elif [ "${#_p1}" -lt "$MIN_PASSWD_LEN" ]; then
+		echo_W "Password is too short!" "200"
+	elif [ "$_p1" = "GabeNewell#1" ]; then
+		echo_W "This password is publicly known.\nPlease, choose another one." "250"
+	else
+		_setPassword "$_p1"
+		break
+	fi
+done
+}
+
 ## Set password for user account
 # $1-Username; $2-Password
-_setUserPassword() {
-passwd "$1" << EOD &> /dev/null
-$2
-$2
-EOD
-}
+_setUserPassword() { printf '%s\n%s\n' "$2" "$2" | passwd "$1" &> /dev/null; }
 
 ## Try to set password for user account
 # $1-Username; $2-Password
@@ -114,7 +135,7 @@ local _passWord; _passWord=${2:-$(_getPassword)}
 # Check if user exists
 if ! _userExists "$_userName"; then
 	echo_E "User '$_userName' does not exist!"
-	return
+	return 1
 fi
 # Check if user already has its password set
 if _userHasPassword "$_userName"; then
@@ -125,7 +146,7 @@ else
 	# Check if password has been set
 	if ! _userHasPassword "$_userName"; then
 		echo_E "Password couldn't be set!"
-		return
+		return 1
 	fi
 fi
 }
@@ -141,7 +162,7 @@ local _userName; _userName=${1:-$userName}
 # Check if user exists
 if ! _userExists "$_userName"; then
 	echo_E "User '$_userName' does not exist!"
-	return
+	return 1
 fi
 # Check if user already has its password set
 if ! _userHasPassword "$_userName"; then
@@ -154,7 +175,7 @@ else
 		sudo -k # Invalidate user's cached credentials
 	else
 		echo_E "Password couldn't be removed!"
-		return
+		return 1
 	fi
 fi
 }
@@ -168,22 +189,89 @@ if [ "$_t" = 1 ]; then
 	if _userHasPassword "$userName"; then
 		_readExistingUserPassword
 	else
-		setUserPassword "$userName"
+		_askNewPassword
+		setUserPassword "$userName" || exit
 	fi
 	_validateSudoPassword "$(_getPassword)" &> /dev/null
 else
 	sudo -v # Extend current sudo session
 fi
+if [ "$(_sudoStatus)" != 2 ]; then
+	echo_E "Couldn't obtain root rights." "200"
+	exit
+fi
 }
 
-## Removes user password if user didn't have one set on script launch
+## Offers to remove user password if user didn't have one set before this tool set it
 sudoTaskFinalize() {
-[ "$DEF_USR_HAS_PASSWD" = 0 ] && [ "$USR_CHANGED_PASSWD" = 0 ] && removeUserPassword "$userName"
+[ "$DEF_USR_HAS_PASSWD" = 0 ] || return
+_userHasPassword "$userName" || return
+zenity --question \
+--title="$TOOL_NAME $TOOL_VERSION" \
+--width="350" \
+--text="Your account had no password before you used $TOOL_NAME.\n\nWould you like to REMOVE the password now (SteamOS default)?" 2> /dev/null &&
+removeUserPassword "$userName"
 }
 
 ## Refreshes org.kde.Solid.PowerManagement config status
 _refreshPlasmaConfigStatus() {
 qdbus org.kde.Solid.PowerManagement /org/kde/Solid/PowerManagement org.kde.Solid.PowerManagement.refreshStatus
+}
+
+## Backs up a file before it gets overwritten
+# An existing backup is never overwritten, so an interrupted run can't destroy the original file.
+# If there was no original file, a '.none' marker is created instead.
+# $1-File; $2-Backup; $3-Use sudo (1/0)
+_backupFile() {
+local _s=(); [ "$3" = 1 ] && _s=(sudo)
+{ [ -e "$2" ] || [ -e "$2.none" ]; } && return
+if [ -e "$1" ]; then
+	"${_s[@]}" cp -fp -- "$1" "$2"
+else
+	"${_s[@]}" touch -- "$2.none"
+fi
+}
+
+## Restores a file from its backup
+# Files that haven't been backed up by this tool are left untouched.
+# $1-File; $2-Backup; $3-Use sudo (1/0)
+_restoreFile() {
+local _s=(); [ "$3" = 1 ] && _s=(sudo)
+if [ -e "$2" ]; then
+	"${_s[@]}" mv -f -- "$2" "$1"
+elif [ -e "$2.none" ]; then
+	"${_s[@]}" rm -f -- "$1" "$2.none"
+fi
+}
+
+## Backs up a file and overwrites it with the patched one
+# $1-File; $2-Backup; $3-Patched file; $4-Use sudo (1/0)
+_patchFile() {
+local _s=(); [ "$4" = 1 ] && _s=(sudo)
+_backupFile "$1" "$2" "$4"
+"${_s[@]}" install -m 644 -- "$3" "$1"
+}
+
+## Restores backups of all the files this tool could have overwritten
+_restoreFiles() {
+(_restoreFile "$SshdConfigPath" "$BackupSshdConfigPath" 1
+_restoreFile "$MotdPath" "$BackupMotdPath" 1
+_restoreFile "$WarningNetPath" "$BackupWarningNetPath" 1
+_restoreFile "$AuthorizedKeysPath" "$BackupAuthorizedKeysPath" 1) &> /dev/null
+(_restoreFile "$PowerManProfilePath" "$BackupPowerManProfilePath" 0
+_refreshPlasmaConfigStatus) &> /dev/null
+}
+
+## Checks if the authorized_keys file contains at least one key and none of the keys that used to ship with this tool
+_checkAuthorizedKeys() {
+if grep -qF "$OLD_BUNDLED_KEY" "$PatchedAuthorizedKeysPath"; then
+	echo_E "'./data/authorized_keys' still contains the public key that came with the original SteamDeckSSH.\n\nRemove it and paste your own public key instead." "400"
+	return 1
+fi
+if ! grep -qE '^[[:space:]]*(ssh-|ecdsa-|sk-)' "$PatchedAuthorizedKeysPath"; then
+	echo_E "There is no public key in './data/authorized_keys'.\n\nPaste your own public key there first." "350"
+	return 1
+fi
 }
 
 _sshdQuestion() {
@@ -199,24 +287,30 @@ esac
 }
 
 _sshdEnable() {
-# Remember if user had password set 
-[ "$FIRST_LAP" = 1 ] && echo "$DEF_USR_HAS_PASSWD" > "$PflPath"
 # Ask user using zenity
-_sshdQuestion "SSH Server Status: DISABLED\n\nWould you like to ENABLE it?" &> /dev/null
+local _q="SSH Server Status: DISABLED\n\nWould you like to ENABLE it?"
+[ "$KEY_AUTH" != 1 ] && _q="$_q\n\n(Password login will be allowed. Use it only on a network you trust.)"
+_sshdQuestion "$_q" &> /dev/null
+# Key authentication is useless without a key
+[ "$KEY_AUTH" = 1 ] && { _checkAuthorizedKeys || exit; }
 # Become sudo
 checkSudo
 # Make backup of files and overwrite original ones with the modified files
-(sudo cp -f "$SshdConfigPath" "$BackupSshdConfigPath"
-sudo cp -f "$PatchedSshdConfigPath" "$SshdConfigPath"
-sudo cp -f "$MotdPath" "$BackupMotdPath"
-sudo cp -f "$PatchedMotdPath" "$MotdPath"
-sudo cp -f "$WarningNetPath" "$BackupWarningNetPath"
-sudo cp -f "$PatchedWarningNetPath" "$WarningNetPath") &> /dev/null
-[ "$KEY_AUTH" = 1 ] && (sudo cp -f "$AuthorizedKeysPath" "$BackupAuthorizedKeysPath"
-sudo cp -f "$PatchedAuthorizedKeysPath" "$AuthorizedKeysPath") &> /dev/null
-[ "$DISABLE_SUSPENSION" = 1 ] && (cp -f "$PowerManProfilePath" "$BackupPowerManProfilePath"
-cp -f "$PatchedPowerManProfilePath" "$PowerManProfilePath"
+(_patchFile "$SshdConfigPath" "$BackupSshdConfigPath" "$PatchedSshdConfigPath" 1
+_patchFile "$MotdPath" "$BackupMotdPath" "$PatchedMotdPath" 1
+_patchFile "$WarningNetPath" "$BackupWarningNetPath" "$PatchedWarningNetPath" 1) &> /dev/null
+[ "$KEY_AUTH" = 1 ] && _patchFile "$AuthorizedKeysPath" "$BackupAuthorizedKeysPath" "$PatchedAuthorizedKeysPath" 1 &> /dev/null
+[ "$DISABLE_SUSPENSION" = 1 ] && (_patchFile "$PowerManProfilePath" "$BackupPowerManProfilePath" "$PatchedPowerManProfilePath" 0
 _refreshPlasmaConfigStatus) &> /dev/null
+# Don't start the service with a broken config (host keys are needed for the test, so create the missing ones)
+sudo ssh-keygen -A &> /dev/null
+if ! sudo sshd -t &> /dev/null; then
+	_restoreFiles
+	echo_E "The patched SSH config is invalid. The original files have been restored." "350"
+	exit
+fi
+# Remember if user had password set
+echo "$DEF_USR_HAS_PASSWD" > "$PflPath"
 # Enable the sshd service
 sudo systemctl enable --now sshd
 # Finalize
@@ -231,19 +325,10 @@ checkSudo
 # Disable the sshd service
 sudo systemctl disable --now sshd
 # Restore backups of the original files
-(rm -f "$SshdConfigPath"
-sudo mv -f "$BackupSshdConfigPath" "$SshdConfigPath"
-rm -f "$MotdPath"
-sudo mv -f "$BackupMotdPath" "$MotdPath"
-rm -f "$WarningNetPath"
-sudo mv -f "$BackupWarningNetPath" "$WarningNetPath") &> /dev/null
-[ "$KEY_AUTH" = 1 ] && (sudo rm -f "$AuthorizedKeysPath"
-sudo mv -f "$BackupAuthorizedKeysPath" "$AuthorizedKeysPath") &> /dev/null
-[ "$DISABLE_SUSPENSION" = 1 ] && (rm -f "$PowerManProfilePath"
-mv -f "$BackupPowerManProfilePath" "$PowerManProfilePath"
-_refreshPlasmaConfigStatus) &> /dev/null
+_restoreFiles
 # Finalize
 sudoTaskFinalize
+rm -f "$PflPath"
 }
 
 _sshdUnavailable() {
@@ -270,13 +355,13 @@ declare -r settingsDefaults=("0" "$(_randomPasswordGen "32")" "0" "1") # Setting
 
 ## Reads settings from a 'settingsJson' config file
 _readSettingsJson() {
-_jq() { jq -r ".$1" "$settingsJson"; }
+_jq() { jq -r ".$1 // empty" "$settingsJson" 2> /dev/null; }
 local _t;
 # Settings to read
 for (( i=0; i<"${#settingsNames[@]}"; i++ ))
 do
 	_t="$(_jq "${settingsNames[$i]}")"
-	_t=$([ -z "$_t" ] || [ "$_t" = "null" ] && echo "${settingsDefaults[$i]}" || echo "$_t")
+	[ -z "$_t" ] && _t="${settingsDefaults[$i]}"
 	printf -v "${settingsNames[$i]}" -- "%${settingsFormats[$i]}" "$_t"
 done
 }
@@ -284,26 +369,24 @@ done
 ## Writes settings to a 'settingsJson' config file
 _writeSettingsJson() {
 local _n;
-local _q;
-# Settings to write
+local _a=();
+# Settings to write (jq escapes the values, so any character is safe)
 for (( i=0; i<"${#settingsNames[@]}"; i++ ))
 do
 	_n=${settingsNames[$i]}
-	[ "$i" -gt 0 ] && _q="$_q | "
-	_q="$_q.$_n=\"${!_n}\""
+	_a+=(--arg "$_n" "${!_n}")
 done
-jq -n "$_q" > "$settingsJson";
+(umask 077; jq -n "${_a[@]}" '$ARGS.named' > "$settingsJson")
 }
 
 ## Loads Settings from an existing 'settingsJson' config file or creates a new one
 loadSettingsJson() {
-local _s="$settingsJson"
-if ! [ -e "./$_s" ]; then
-	touch "$_s"
-	_readSettingsJson # in this case it sets the default settings
-	_writeSettingsJson # write new settings file
-else
+local _f="$settingsJson"
+if [ -s "./$_f" ] && jq -e . "./$_f" &> /dev/null; then
 	_readSettingsJson # load settings from the existing file
+else
+	_readSettingsJson # in this case it sets the default settings
+	_writeSettingsJson # write new settings file (or replace the broken one)
 fi
 }
 
@@ -313,8 +396,9 @@ fi
 ## MAIN VARIABLES
 SESSION_GUID="$(uuidgen | tr "[:lower:]" "[:upper:]")"; readonly SESSION_GUID
 ROOT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd); readonly ROOT_DIR
+cd -- "$ROOT_DIR" || exit # all the relative paths below depend on it
 declare -r TOOL_NAME="SteamDeckSSH"
-declare -r TOOL_VERSION="v1.0.0"
+declare -r TOOL_VERSION="v1.0.1-fixed"
 
 ## PATHS
 declare -r PflPath="./.pfl" # previous first launch
@@ -335,13 +419,13 @@ declare -r PowerManProfilePath="/home/$USER/.config/powermanagementprofilesrc"
 declare -r BackupPowerManProfilePath="/home/$USER/.config/powermanagementprofilesrc_original"
 declare -r PatchedPowerManProfilePath="./data/powermanagementprofilesrc"
 
-## Username and temporary password
+## Username and password rules
 userName="$USER" # real username (deck)
-declare -r tempPasswd="GabeNewell#1"
+declare -r MIN_PASSWD_LEN=8
+# Beginning of the public key that shipped in './data/authorized_keys' of the original SteamDeckSSH
+declare -r OLD_BUNDLED_KEY="AAAAB3NzaC1yc2EAAAADAQABAAACAQDj7HwmOTlCJzw3VVg2xlmtMp2SCdJXI"
 
 ## FLAGS
-FIRST_LAP=1
-USR_CHANGED_PASSWD=0
 DEF_USR_HAS_PASSWD=$( ([ "$(_sshdState)" = 2 ] && cat "$PflPath") || (_userHasPassword "$userName" && echo 1 || echo 0) ); readonly DEF_USR_HAS_PASSWD
 
 
@@ -353,21 +437,19 @@ if [ "$(_sudoStatus)" = 0 ]; then
 	exit
 fi
 
-cd -- "$ROOT_DIR" || return
-
 loadSettingsJson
-_setPassword "$( ([ -e $UserSecPath ] && "_readUserSec") || echo "$tempPasswd" )"
+passWord=""
+_t="$(_readUserSec)"; [ -n "$_t" ] && _setPassword "$_t"; unset _t
 
 get_sshd_config() {
-case "$KEY_AUTH" in 
-	1) echo "sshd_config-ka";; 
-	*) echo "sshd_config-pa";; 
+case "$KEY_AUTH" in
+	1) echo "sshd_config-ka";;
+	*) echo "sshd_config-pa";;
 esac
-} 
+}
 PatchedSshdConfigPath="./data/$(get_sshd_config)"; readonly PatchedSshdConfigPath
 
 while true
 do
 	_sshdScenario
-	FIRST_LAP=0
 done

@@ -19,9 +19,9 @@ First, the script tries to obtain the root rights. If you've already set your cu
 
 By default, remembering the user's custom password is disabled. You can change it by setting the **"REMEMBER_PASSWORD"** flag to **"1"** in the ***"settings.json"*** file. After the change, the script will remember the next entered password and save it in the encrypted ***".user.sec"*** file.
 
-If you don't have a password set then the script will set the default password, which is **"GabeNewell#1"**. 
+If you don't have a password set then the script will ask you to choose your own (at least 8 characters). There is no built-in default password anymore, because a password published on the internet is no password at all.
 
-Unless you're using your password, it will be removed as soon as it's no longer needed and it depends on the scenario you pick. When you are using password authentication the password is needed for as long as the SSH server is enabled. In the case of key authentication, the password is needed only to enable or disable the server, but not between those steps. 
+If your account had no password before, the script will offer to remove it again (SteamOS default) as soon as it's no longer needed, and it depends on the scenario you pick. When you are using password authentication the password is needed for as long as the SSH server is enabled. In the case of key authentication, the password is needed only to enable or disable the server, but not between those steps. 
 
 No matter which scenario you choose, the current SSH config will be backed up and then the script will insert a temporary configuration prepared by me.
 
@@ -47,12 +47,14 @@ I did some research and prepared two configurations that I consider reasonable:
 | **AllowUsers** deck                         |
 | **Banner** /etc/ssh/warning.net             |
 | **ClientAliveInterval** 120                 |
-| **ClientAliveCountMax** 0                   |
+| **ClientAliveCountMax** 3                   |
+| **LoginGraceTime** 30                       |
+| **MaxAuthTries** 3                          |
+| **PasswordAuthentication** yes              |
 | **PermitEmptyPasswords** no                 |
 | **PermitRootLogin** no                      |
 | **Port** 2122                               |
 | **PrintMotd** yes                           |
-| **Protocol** 2                              |
 | **AuthorizedKeysFile** .ssh/authorized_keys |
 | **KbdInteractiveAuthentication** no         |
 | **Subsystem** sftp /usr/lib/ssh/sftp-server |
@@ -63,15 +65,15 @@ I did some research and prepared two configurations that I consider reasonable:
 | **AllowUsers** deck                             |
 | **AuthorizedKeysFile** /etc/ssh/authorized_keys |
 | **Banner** /etc/ssh/warning.net                 |
-| **ChallengeResponseAuthentication** no          |
 | **ClientAliveInterval** 120                     |
-| **ClientAliveCountMax** 0                       |
+| **ClientAliveCountMax** 3                       |
+| **LoginGraceTime** 30                           |
+| **MaxAuthTries** 3                              |
 | **PasswordAuthentication** no                   |
 | **PermitEmptyPasswords** no                     |
 | **PermitRootLogin** no                          |
 | **Port** 2122                                   |
 | **PrintMotd** yes                               |
-| **Protocol** 2                                  |
 | **UsePAM** no                                   |
 | **KbdInteractiveAuthentication** no             |
 | **Subsystem** sftp /usr/lib/ssh/sftp-server     |
@@ -86,15 +88,18 @@ Next, you need to generate SSH keys on the client device from which you want to 
 
 I use the following console command:  
 ```markdown
-ssh-keygen -t rsa -b 4096
+ssh-keygen -t ed25519
 ```
 
-The above line will generate two keys: private (**id_rsa**) and public (**id_rsa.pub**). You shouldn't make copies of your private key. You should store it on the client device that generated it.
+The above line will generate two keys: private (**id_ed25519**) and public (**id_ed25519.pub**). You shouldn't make copies of your private key. You should store it on the client device that generated it.
 The public key is more of a lock than a key. You can safely publish it or get it compromised. It can be opened with your private key but not the other way.
 
 During the process, it will ask you where to save the keys and if you would like to add a passphrase. The passphrase is optional protection. Think of it as your fingerprint that activates the key. Without it, the key is useless to the thief who stole the key from you. Decide if you need additional protection or not.
 
-A final step is to copy the content of ***id_rsa.pub*** inside ***./data/authorized_keys*** on your SteamDeck.
+A final step is to copy the content of ***id_ed25519.pub*** inside ***./data/authorized_keys*** on your SteamDeck.
+
+> [!IMPORTANT]
+> The original SteamDeckSSH shipped with somebody else's public key in ***./data/authorized_keys***. This version ships with an empty file, and the script refuses to enable key authentication while that old key is still in the file or while there is no key at all.
 
 > [!TIP]
 > You can add more than one key. Just paste every next key in the new line.
@@ -110,23 +115,10 @@ By default, the script backups current power management settings and overwrites 
 If you don't want this feature then you can disable it by changing the value of **"DISABLE_SUSPENSION"** flag to **"0"** in the ***"settings.json"*** file.
 
 # 🧑‍🔧 Installing the script
-There are two ways to install this tool: Automatic or Manual [PRO].
+The online installer (`curl ... | bash`) has been removed, because it always installs the latest upstream release, not this fixed version.
 
-### A) Automatic installation
-The automatic installation script will download and install the latest version of this tool in the ***'DOCUMENTS'*** directory and create a shortcut on ***'DESKTOP'***.
-
-To install this way, open a new Konsole window and paste one of the following lines of code depending on what you want to do:
-#### Install
-```bash
-curl -sSL https://raw.githubusercontent.com/mi5hmash/SteamDeckSSH/main/_Installer.sh | bash
-```
-
-#### Uninstall
-```bash
-curl -sSL https://raw.githubusercontent.com/mi5hmash/SteamDeckSSH/main/_Installer.sh | bash -s -- -u
-```
-### B) Manual installation
-Grab the [latest release](https://github.com/mi5hmash/SteamDeckSSH/releases/latest) and unpack it on your Steam Deck.
+### Manual installation
+Copy this folder to your Steam Deck (e.g. into ***Documents***).
 Then right-click on the ***'_Create a Shortcut on Desktop.sh'*** and select *"Properties"*. Navigate to the "Permissions" tab and make sure that an "Is executable" checkbox is ticked.
 
 <img src=".resources/images/permissions.png" alt="permissions" width="415"/>
@@ -140,8 +132,14 @@ A desktop shortcut will be created.
 
 <img src=".resources/images/desktop_icon.png" alt="desktop_icon" width="280"/>
 
+### Uninstallation
+Make sure SSH is DISABLED first (so the original config files are restored), then run ***'_Create a Shortcut on Desktop.sh'*** with the `-r` option to remove the shortcuts and delete the folder:
+```bash
+"./_Create a Shortcut on Desktop.sh" -r
+```
+
 # :runner: Running the script
-Regardless of which installation method you choose, you should end up with a shortcut on your desktop. Run the script with it.
+You should end up with a shortcut on your desktop. Run the script with it.
 
 **Do not attempt to execute 'SteamDeckSSH.sh' by clicking twice on it, because this will run the script in a hidden window.**
 

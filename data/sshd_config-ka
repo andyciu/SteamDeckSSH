@@ -2,15 +2,15 @@
 AllowUsers deck
 AuthorizedKeysFile /etc/ssh/authorized_keys
 Banner /etc/ssh/warning.net
-ChallengeResponseAuthentication no
 ClientAliveInterval 120
-ClientAliveCountMax 0
+ClientAliveCountMax 3
+LoginGraceTime 30
+MaxAuthTries 3
 PasswordAuthentication no
 PermitEmptyPasswords no
 PermitRootLogin no
 Port 2122
 PrintMotd yes
-Protocol 2
 UsePAM no
 # Default values
 KbdInteractiveAuthentication no
